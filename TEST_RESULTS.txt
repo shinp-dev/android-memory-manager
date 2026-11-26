@@ -1,0 +1,24 @@
+PASS: shell every chunk size 1..64 / Japanese / CRLF
+PASS: shell end marker before start is ignored
+PASS: shell EOF, truncated marker, size cap
+PASS: shell nonzero status and known errors with exit 0
+PASS: PSS rejects negative or zero PID, does not include RSS
+PASS: numeric UID parser, other users, invalid and duplicate PID
+PASS: PID churn, changed UID, missing PID
+PASS: package UID parsing and exclusive attribution
+PASS: snapshot uses real UID, not process name; missing PID fails closed
+PASS: valid force stop uses explicit user
+PASS: reject wrong current user without sending force-stop
+PASS: reject changed UID without sending force-stop
+PASS: reject shared UID without sending force-stop
+PASS: reject system/non-third-party without sending force-stop
+PASS: reject default home without sending force-stop
+PASS: reject default IME without sending force-stop
+PASS: reject unknown home without sending force-stop
+PASS: reject unknown IME without sending force-stop
+PASS: reject already stopped without sending force-stop
+PASS: reject shell injection and own app
+PASS: force-stop error not reported as success
+AUDIT PASS: 21 scenarios (including 64 chunk sizes in one scenario)
+PASS: ADB shell framing, CRLF, partial output, exit status and permission errors
+PASS: PSS section, comma/unit parsing, process deduplication, aggregation, wire encoding, missing PSS, package validation
