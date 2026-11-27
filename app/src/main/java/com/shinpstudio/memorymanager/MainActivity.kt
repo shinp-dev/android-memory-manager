@@ -20,6 +20,8 @@ class MainActivity : Activity() {
     private var binding = false
     private var busy = false
     private var destroyed = false
+    @Volatile private var resumedForStop = false
+    @Volatile private var multiWindowForStop = false
     private var pendingOverlay = false
     private var pendingPairSettings = false
     private var apps = emptyList<AppRow>()
@@ -73,9 +75,9 @@ class MainActivity : Activity() {
         buttons(); updateRam(); syncOverlay()
         if (getPreferences(MODE_PRIVATE).getBoolean("paired",false)) connectAdb(null,null,null)
     }
-    override fun onResume() { super.onResume(); if(pendingOverlay){pendingOverlay=false;if(Settings.canDrawOverlays(this))startOverlay() else Toast.makeText(this,"オーバーレイ権限が必要です",Toast.LENGTH_SHORT).show()}; handler.removeCallbacks(tick); handler.post(tick); buttons(); if(pendingPairSettings){pendingPairSettings=false;connectionDialog()} }
-    override fun onPause(){handler.removeCallbacks(tick);super.onPause()}
-    override fun onMultiWindowModeChanged(isInMultiWindowMode:Boolean, newConfig:android.content.res.Configuration){super.onMultiWindowModeChanged(isInMultiWindowMode,newConfig);if(::list.isInitialized)render()}
+    override fun onResume() { super.onResume(); multiWindowForStop=isInMultiWindowMode;resumedForStop=true; if(pendingOverlay){pendingOverlay=false;if(Settings.canDrawOverlays(this))startOverlay() else Toast.makeText(this,"オーバーレイ権限が必要です",Toast.LENGTH_SHORT).show()}; handler.removeCallbacks(tick); handler.post(tick); buttons(); if(pendingPairSettings){pendingPairSettings=false;connectionDialog()} }
+    override fun onPause(){resumedForStop=false;handler.removeCallbacks(tick);super.onPause()}
+    override fun onMultiWindowModeChanged(isInMultiWindowMode:Boolean, newConfig:android.content.res.Configuration){super.onMultiWindowModeChanged(isInMultiWindowMode,newConfig);multiWindowForStop=isInMultiWindowMode;if(::list.isInitialized)render()}
     private fun enableOverlay(){ if(!Settings.canDrawOverlays(this)){ pendingOverlay=true; overlay.isChecked=false; try { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName"))) } catch(e:Exception){pendingOverlay=false;setStatus("設定から他のアプリの上に表示を許可してください")} } else startOverlay() }
     private fun startOverlay(){try{startForegroundService(Intent(this,OverlayService::class.java)); if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),72)}catch(e:Exception){setStatus("オーバーレイ起動失敗: ${e.message}");overlay.isChecked=false}}
     private fun syncOverlay(){overlay.isChecked=OverlayService.running}
@@ -190,6 +192,7 @@ class MainActivity : Activity() {
             val results=confirmed.map{(p,uid)->
                 val response=when{
                     p==self||p in excluded -> "SKIP\n保護・除外対象"
+                    !resumedForStop||multiWindowForStop -> "SKIP\nアプリが前面にないか分割画面のため中断"
                     fresh.isFailure -> "ERROR\n終了前の再取得に失敗"
                     current[p]!=uid -> "SKIP\n停止済み、UID変更または保護対象"
                     else -> runCatching{remote.stopPackage(p,uid)}.getOrElse{"ERROR\n${it.message}"}
