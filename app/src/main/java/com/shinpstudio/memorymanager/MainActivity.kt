@@ -16,6 +16,8 @@ class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var service: ShellMemoryService? = null
+    private var activeBinder: android.os.IBinder? = null
+    private var attemptedBinder: android.os.IBinder? = null
     private val adb by lazy { LocalAdb(applicationContext) }
     private var binding = false
     private var busy = false
@@ -39,7 +41,7 @@ class MainActivity : Activity() {
     private lateinit var list: LinearLayout
     private lateinit var showSystem: CheckBox
     private lateinit var search: EditText
-    private val tick = object : Runnable { override fun run() { updateRam(); syncOverlay(); handler.postDelayed(this, 3000) } }
+    private val tick = object : Runnable { override fun run() { updateRam(); syncOverlay(); checkBridge(); handler.postDelayed(this, 3000) } }
     private data class AppRow(val name: String, val pkg: String?, val pss: Long, val processes: List<ProcessMemory>, val protected: Boolean, val uid: Int?)
     private fun dp(n: Int) = (n*resources.displayMetrics.density).toInt()
     private fun label(s: String, size: Float = 14f) = TextView(this).apply { text=s; textSize=size; setTextColor(Color.rgb(31,47,46)) }
@@ -60,8 +62,8 @@ class MainActivity : Activity() {
         bar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max=100 }; root.addView(bar,LinearLayout.LayoutParams(-1,dp(12)))
         root.addView(label("使用量＝総RAM − 利用可能RAM（概算）",12f))
         overlay=Switch(this).apply { text="RAMオーバーレイ"; setOnClickListener { if (isChecked) enableOverlay() else stopService(Intent(this@MainActivity,OverlayService::class.java)) } }; root.addView(overlay)
-        val actions=horizontal(); connect=button("ADB接続") { connectionDialog() }; refresh=button("更新") { load() }; actions.weighted(connect);actions.weighted(refresh);root.addView(actions)
-        status=label("ADB未接続",13f);root.addView(status)
+        val actions=horizontal(); connect=button("サービス接続") { connectionDialog() }; refresh=button("更新") { load() }; actions.weighted(connect);actions.weighted(refresh);root.addView(actions)
+        status=label("常駐サービス未接続",13f);root.addView(status)
         search=EditText(this).apply { hint="アプリ名・パッケージで検索"; isSingleLine=true; textSize=14f }; root.addView(search)
         search.addTextChangedListener(object: android.text.TextWatcher { override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int){}; override fun onTextChanged(s:CharSequence?,start:Int,before:Int,count:Int){ if(::list.isInitialized) render() }; override fun afterTextChanged(s:android.text.Editable?){} })
         val filters=horizontal(); showSystem=CheckBox(this).apply { text="システム等も表示"; isChecked=true; setOnCheckedChangeListener { _,_-> if(::list.isInitialized)render() } }; filters.weighted(showSystem);bulk=button("選択を終了") { confirmStop(selected.toList()) };filters.addView(bulk);root.addView(filters)
@@ -73,7 +75,7 @@ class MainActivity : Activity() {
         root.addView(label("アプリ別 PSS（多い順）／タップでプロセス詳細",12f))
         list=column(); val scroll=ScrollView(this).apply { addView(list) };root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
         buttons(); updateRam(); syncOverlay()
-        if (getPreferences(MODE_PRIVATE).getBoolean("paired",false)) connectAdb(null,null,null)
+        if (getPreferences(MODE_PRIVATE).getBoolean("paired",false) || ShellBridge.current()!=null) connectAdb(null,null,null)
     }
     override fun onResume() { super.onResume(); multiWindowForStop=isInMultiWindowMode;resumedForStop=true; if(pendingOverlay){pendingOverlay=false;if(Settings.canDrawOverlays(this))startOverlay() else Toast.makeText(this,"オーバーレイ権限が必要です",Toast.LENGTH_SHORT).show()}; handler.removeCallbacks(tick); handler.post(tick); buttons(); if(pendingPairSettings){pendingPairSettings=false;connectionDialog()} }
     override fun onPause(){resumedForStop=false;handler.removeCallbacks(tick);super.onPause()}
@@ -116,11 +118,11 @@ class MainActivity : Activity() {
     private fun connectionDialog(){
         if(busy || binding)return
         val fields=column().apply { setPadding(dp(20),0,dp(20),0) }
-        fields.addView(label("初回：設定のワイヤレスデバッグをON。分割画面でペア設定コードを確認してください。ポートは通常自動検出します。"))
+        fields.addView(label("常駐サービスが動作中なら全欄空白で接続できます。初回・端末再起動後はWi-FiとワイヤレスデバッグをON。初回のみ分割画面でペア設定コードを確認してください。"))
         val port=EditText(this).apply{hint="ペア用ポート（自動検出できない場合）";inputType=2};fields.addView(port)
         val code=EditText(this).apply{hint="6桁のペア設定コード（初回のみ）";inputType=18};fields.addView(code)
         val target=EditText(this).apply{hint="接続用ポート（空欄で自動検出）";inputType=2};fields.addView(target)
-        AlertDialog.Builder(this).setTitle("端末内ADB").setView(fields).setNeutralButton("開発者設定"){_,_->pendingPairSettings=true;startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))}.setNegativeButton("閉じる",null).setPositiveButton("接続",null).create().apply{
+        AlertDialog.Builder(this).setTitle("端末内常駐サービス").setView(fields).setNeutralButton("開発者設定"){_,_->pendingPairSettings=true;startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))}.setNegativeButton("閉じる",null).setPositiveButton("接続",null).create().apply{
             setOnShowListener{getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener{
                 val p=port.text.toString();val c=code.text.toString();val t=target.text.toString()
                 if((p.isNotEmpty()&&(p.toIntOrNull() ?: 0) !in 1..65535)||((p.isNotEmpty()||c.isNotEmpty())&&!c.matches(Regex("[0-9]{6}")))){port.error="6桁コード、または正しいポートを入力";return@setOnClickListener}
@@ -129,15 +131,30 @@ class MainActivity : Activity() {
             }};show()
         }
     }
+    private fun checkBridge(){
+        if(destroyed || busy || binding) return
+        if(service!=null && activeBinder?.isBinderAlive!=true){
+            service=null; activeBinder=null; selected.clear()
+            setStatus("常駐サービス停止。Wi-Fi接続中に再起動してください"); render()
+        }
+        val binder=ShellBridge.current()
+        if(service==null && binder!=null && binder!==attemptedBinder) connectAdb(null,null,null)
+    }
     private fun connectAdb(pairPort:Int?,code:String?,connectPort:Int?){
         if(destroyed||busy||binding)return
-        binding=true;service=null;selected.clear();setStatus("端末内ADBに接続中…");buttons();render()
+        binding=true;service=null;activeBinder=null;selected.clear();setStatus("常駐サービスに接続中…");buttons();render()
         worker.execute{
             val result=runCatching{
-                if(code!=null){adb.pair(pairPort,code);getPreferences(MODE_PRIVATE).edit().putBoolean("paired",true).apply()}
-                adb.connect(connectPort);getPreferences(MODE_PRIVATE).edit().putBoolean("paired",true).apply();ShellMemoryService(adb::command, android.os.Process.myUid() / 100000)
+                val binder=if(code==null) ShellBridge.await(3500) else null
+                val remote=binder ?: try {
+                    if(code!=null){adb.pair(pairPort,code);getPreferences(MODE_PRIVATE).edit().putBoolean("paired",true).apply()}
+                    adb.connect(connectPort)
+                    getPreferences(MODE_PRIVATE).edit().putBoolean("paired",true).apply()
+                    ShellBridge.start(applicationContext,adb)
+                } finally { adb.disconnect() }
+                ShellBridge.service(remote,android.os.Process.myUid()/100000) to remote
             }
-            runOnUiThread{if(destroyed)return@runOnUiThread;binding=false;result.onSuccess{service=it;setStatus("ADB接続済み");load()}.onFailure{setStatus("接続失敗: ${it.message}。ワイヤレスデバッグとペア設定を確認")};buttons();render()}
+            runOnUiThread{if(destroyed)return@runOnUiThread;binding=false;result.onSuccess{service=it.first;activeBinder=it.second;attemptedBinder=it.second;setStatus("常駐サービス接続済み（Wi-Fi不要）");load()}.onFailure{attemptedBinder=ShellBridge.current();setStatus("接続失敗: ${it.message}。初回・再起動後はWi-Fiとワイヤレスデバッグを確認")};buttons();render()}
         }
     }
     private fun group(snapshot: Snapshot):List<AppRow>{
