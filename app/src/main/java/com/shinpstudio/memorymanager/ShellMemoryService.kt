@@ -3,7 +3,7 @@ package com.shinpstudio.memorymanager
 data class Snapshot(val rows: List<ProcessMemory>, val packages: Map<String, Int>)
 
 /** Only fixed commands and validated package names may cross the ADB boundary. */
-class ShellMemoryService(private val run: (String) -> String, private val user: Int) {
+class ShellMemoryService(private val run: (String) -> String, private val user: Int, private val remoteStop: ((String, Int) -> String)? = null) {
     init { require(user >= 0) }
     private fun command(vararg args: String): String = run(args.filter { it.isNotEmpty() }.joinToString(" "))
     private fun processes() = ProcessIdentity.parse(command("/system/bin/ps", "-A", "-o", "UID:12,PID:12"))
@@ -28,7 +28,9 @@ class ShellMemoryService(private val run: (String) -> String, private val user: 
         check(homePkg != null && MemoryParser.validPackage(homePkg) && ime.contains('/') && MemoryParser.validPackage(imePkg)) { "ホームまたは入力アプリの保護を確認できません" }
         check(packageName != homePkg && packageName != imePkg) { "ホームまたは入力アプリは保護対象です" }
         check(expectedUid in processes().values) { "対象はすでに停止しています" }
-        command("/system/bin/am", "force-stop", "--user", user.toString(), packageName)
-        "OK"
+        if (remoteStop != null) remoteStop.invoke(packageName, expectedUid) else {
+            command("/system/bin/am", "force-stop", "--user", user.toString(), packageName)
+            "OK"
+        }
     } catch (e: Exception) { "ERROR\n${e.message ?: e.javaClass.simpleName}" }
 }
